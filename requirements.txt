@@ -11,4 +11,3 @@ shap
 grad-cam
 streamlit
 jupyter
-ydata-profiling
