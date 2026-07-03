@@ -1,0 +1,14 @@
+torch
+torchvision
+numpy
+pandas
+scikit-learn
+xgboost
+matplotlib
+seaborn
+opencv-python
+shap
+grad-cam
+streamlit
+jupyter
+ydata-profiling
