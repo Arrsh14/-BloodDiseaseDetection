@@ -36,6 +36,23 @@ def build_leukemia_model(unfreeze_layer4=False):
     return model
 
 
+def build_leukemia_model_for_inference():
+    """
+    Builds the same ResNet18 architecture WITHOUT downloading/verifying
+    pretrained ImageNet weights (weights=None). This avoids a torch.hub
+    hang that occurs when XGBoost has already been imported earlier in
+    the same process (native library/threading conflict on macOS).
+
+    Use this in predict.py / inference code — your own trained weights
+    get loaded via load_state_dict() immediately after building this,
+    so the ImageNet pretrained weights aren't needed here anyway.
+    """
+    model = models.resnet18(weights=None)
+    num_features = model.fc.in_features
+    model.fc = nn.Linear(num_features, 2)
+    return model
+
+
 if __name__ == "__main__":
     model = build_leukemia_model()
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
