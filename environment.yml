@@ -1,0 +1,23 @@
+name: blood-disease-detection
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch
+  - torchvision
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - opencv
+  - jupyter
+  - pip
+  - pip:
+      - xgboost
+      - shap
+      - streamlit
+      - grad-cam
+      - joblib
