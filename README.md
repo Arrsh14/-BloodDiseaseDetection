@@ -95,3 +95,7 @@ streamlit run app/streamlit_app.py
 ## Tech stack
 
 PyTorch, torchvision (ResNet18), XGBoost, scikit-learn, pytorch-grad-cam, Streamlit, pandas, NumPy
+
+
+MADE BY->ARRSH TRIPATHI
+23BCI0191
