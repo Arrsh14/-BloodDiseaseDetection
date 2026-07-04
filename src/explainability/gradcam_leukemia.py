@@ -1,146 +1,126 @@
 """
 Grad-CAM visualization for the leukemia CNN.
-Shows which regions of a cell image the model focused on when predicting
-cancer vs healthy, by hooking into layer4 (the last conv block).
-"""
 
-import torch
-import torch.nn.functional as F
-import numpy as np
-import cv2
+Generates heatmaps showing which regions of each cell image the model
+focused on to make its prediction. Uses the pytorch-grad-cam library,
+targeting the last conv block (layer4) of ResNet18.
+
+Saves a mix of:
+    - Correctly classified examples (both classes)
+    - Misclassified examples (both false positive and false negative)
+so we can visually inspect whether errors correlate with attention on
+irrelevant regions (e.g., cell edges/background rather than interior).
+"""
 
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Subset
+from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+from pytorch_grad_cam.utils.image import show_cam_on_image
+import matplotlib.pyplot as plt
+
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from torch.utils.data import DataLoader, Subset
-
 from src.data.dataset_leukemia import LeukemiaDataset
 from src.data.preprocess_images import get_eval_transforms, IMAGENET_MEAN, IMAGENET_STD
 from src.models.cnn_leukemia import build_leukemia_model
-from src.training.train_leukemia_cnn import get_stratified_splits
-from src.utils.config import LEUKEMIA_RAW, SAVED_MODELS_DIR, ROOT_DIR
+from src.utils.config import LEUKEMIA_RAW, SAVED_MODELS_DIR, RESULTS_DIR
 from src.utils.device import get_device
 
-
-class GradCAM:
-    """
-    Hooks into a target conv layer, captures its activations and gradients
-    during a forward+backward pass, and combines them into a heatmap showing
-    which spatial regions most influenced the model's prediction.
-    """
-
-    def __init__(self, model, target_layer):
-        self.model = model
-        self.target_layer = target_layer
-        self.activations = None
-        self.gradients = None
-
-        # Hooks capture the layer's output (forward) and its gradient (backward)
-        target_layer.register_forward_hook(self._save_activations)
-        target_layer.register_full_backward_hook(self._save_gradients)
-
-    def _save_activations(self, module, input, output):
-        self.activations = output.detach()
-
-    def _save_gradients(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0].detach()
-
-    def generate(self, input_tensor, class_idx):
-        """
-        Runs a forward + backward pass for the given class, then computes
-        the Grad-CAM heatmap.
-        """
-        self.model.zero_grad()
-        output = self.model(input_tensor)
-
-        # Backprop from the score of the class we're explaining
-        score = output[0, class_idx]
-        score.backward()
-
-        # Global-average-pool the gradients -> one importance weight per channel
-        weights = self.gradients.mean(dim=(2, 3), keepdim=True)
-
-        # Weighted sum of activation channels -> single-channel importance map
-        cam = (weights * self.activations).sum(dim=1, keepdim=True)
-        cam = F.relu(cam)  # only keep positive influence, discard negative
-
-        # Resize to match input image size, normalize to 0-1
-        cam = F.interpolate(cam, size=input_tensor.shape[2:], mode="bilinear", align_corners=False)
-        cam = cam.squeeze().cpu().numpy()
-        cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
-
-        return cam
+N_EXAMPLES_PER_CATEGORY = 3  # how many images to save per category below
 
 
-def denormalize_image(tensor):
-    """Reverses ImageNet normalization so we can display the original-looking image."""
-    img = tensor.clone().cpu().numpy().transpose(1, 2, 0)
-    mean = np.array(IMAGENET_MEAN)
-    std = np.array(IMAGENET_STD)
-    img = img * std + mean
-    img = np.clip(img, 0, 1)
-    return img
+def denormalize(tensor):
+    """Reverses ImageNet normalization so the image can be displayed correctly."""
+    mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
+    img = tensor * std + mean
+    img = img.clamp(0, 1)
+    return img.permute(1, 2, 0).numpy()  # CHW -> HWC for plotting/cam overlay
 
 
-def overlay_heatmap(image, cam, alpha=0.4):
-    """Overlays a Grad-CAM heatmap on top of the original image."""
-    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB) / 255.0
-
-    overlay = heatmap * alpha + image * (1 - alpha)
-    return np.clip(overlay, 0, 1)
-
-def main(num_samples=8):
+def main():
     device = get_device()
     print(f"Using device: {device}")
 
-    raw_dataset = LeukemiaDataset(root_dir=LEUKEMIA_RAW, transform=None)
-    _, _, test_idx = get_stratified_splits(raw_dataset)
+    test_idx = np.load(SAVED_MODELS_DIR / "leukemia_test_indices.npy")
+    eval_dataset_full = LeukemiaDataset(root_dir=LEUKEMIA_RAW, transform=get_eval_transforms())
+    test_ds = Subset(eval_dataset_full, test_idx)
 
-    eval_dataset = LeukemiaDataset(root_dir=LEUKEMIA_RAW, transform=get_eval_transforms())
-    test_subset = Subset(eval_dataset, test_idx)
-
-    model = build_leukemia_model(freeze_backbone=False).to(device)
-    model.load_state_dict(torch.load(SAVED_MODELS_DIR / "leukemia_cnn.pth", map_location=device))
+    model = build_leukemia_model(unfreeze_layer4=True).to(device)
+    model.load_state_dict(torch.load(SAVED_MODELS_DIR / "leukemia_cnn_final.pth", map_location=device))
     model.eval()
 
-    # Two GradCAM instances: one per layer, so we can compare resolution/accuracy
-    gradcam_layer3 = GradCAM(model, target_layer=model.layer3)
-    gradcam_layer4 = GradCAM(model, target_layer=model.layer4)
+    # Target the last conv block for Grad-CAM — standard choice for ResNet architectures,
+    # since layer4 captures the highest-level spatial features before global pooling.
+    target_layer = model.layer4[-1]
+    cam = GradCAM(model=model, target_layers=[target_layer])
 
-    output_dir = ROOT_DIR / "results" / "gradcam_outputs" / "leukemia_comparison"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # --- First pass: get predictions for every test example, to sort into categories ---
+    print("Running predictions to categorize examples...")
+    records = []  # list of (index_in_test_ds, true_label, pred_label)
+    with torch.no_grad():
+        for i in range(len(test_ds)):
+            image, label = test_ds[i]
+            output = model(image.unsqueeze(0).to(device))
+            pred = output.argmax(dim=1).item()
+            records.append((i, label, pred))
 
-    class_names = {0: "Healthy", 1: "Cancer"}
+    def find_examples(true_label, pred_label, n):
+        matches = [r for r in records if r[1] == true_label and r[2] == pred_label]
+        return matches[:n]
 
-    for i in range(num_samples):
-        image_tensor, true_label = test_subset[i]
-        input_tensor = image_tensor.unsqueeze(0).to(device)
+    categories = {
+        "true_positive_cancer": find_examples(1, 1, N_EXAMPLES_PER_CATEGORY),   # correctly caught cancer
+        "true_negative_healthy": find_examples(0, 0, N_EXAMPLES_PER_CATEGORY),  # correctly cleared healthy
+        "false_positive": find_examples(0, 1, N_EXAMPLES_PER_CATEGORY),        # healthy misclassified as cancer
+        "false_negative": find_examples(1, 0, N_EXAMPLES_PER_CATEGORY),        # cancer misclassified as healthy
+    }
 
-        output = model(input_tensor)
-        pred_class = output.argmax(dim=1).item()
+    out_dir = RESULTS_DIR / "gradcam_output" / "leukemia"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        original_img = denormalize_image(image_tensor)
+    for category, examples in categories.items():
+        if len(examples) == 0:
+            print(f"No examples found for category: {category}")
+            continue
 
-        # layer3 heatmap
-        cam3 = gradcam_layer3.generate(input_tensor, class_idx=pred_class)
-        overlay3 = overlay_heatmap(original_img, cam3)
+        for rank, (idx, true_label, pred_label) in enumerate(examples):
+            image, _ = test_ds[idx]
+            input_tensor = image.unsqueeze(0).to(device)
 
-        # layer4 heatmap (need fresh forward pass since backward() was already called)
-        output = model(input_tensor)
-        cam4 = gradcam_layer4.generate(input_tensor, class_idx=pred_class)
-        overlay4 = overlay_heatmap(original_img, cam4)
+            grayscale_cam = cam(input_tensor=input_tensor, targets=[ClassifierOutputTarget(pred_label)])
+            grayscale_cam = grayscale_cam[0, :]  # first (only) image in batch
 
-        # Save side by side: original | layer3 | layer4
-        combined = np.concatenate([original_img, overlay3, overlay4], axis=1)
+            rgb_img = denormalize(image.cpu())
+            visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
 
-        save_path = output_dir / f"sample_{i}_true-{class_names[true_label]}_pred-{class_names[pred_class]}.png"
-        cv2.imwrite(str(save_path), cv2.cvtColor(np.uint8(combined * 255), cv2.COLOR_RGB2BGR))
-        print(f"Saved: {save_path.name}")
+            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+            axes[0].imshow(rgb_img)
+            axes[0].set_title("Original")
+            axes[0].axis("off")
+            axes[1].imshow(visualization)
+            axes[1].set_title("Grad-CAM")
+            axes[1].axis("off")
 
-    print(f"\nDone. {num_samples} comparison images saved to {output_dir}")
-    print("Each image shows: [original | layer3 heatmap | layer4 heatmap]")
+            label_names = {0: "healthy", 1: "cancer"}
+            fig.suptitle(
+                f"{category} | true={label_names[true_label]}, pred={label_names[pred_label]}"
+            )
+            plt.tight_layout()
+
+            out_path = out_dir / f"{category}_{rank}.png"
+            plt.savefig(out_path, dpi=150)
+            plt.close()
+            print(f"Saved {out_path}")
+
+    print(f"\nAll Grad-CAM visualizations saved to {out_dir}")
+    print("Inspect these images: does the highlighted (red/warm) region overlap with the "
+          "actual cell body/interior, or does it mostly track edges/background artifacts?")
 
 
 if __name__ == "__main__":
