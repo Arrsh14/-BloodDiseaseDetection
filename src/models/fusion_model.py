@@ -1,130 +1,140 @@
 """
-Fusion logic for the blood disease detection system.
+Fusion logic for the blood disease detection system — LEARNED FUSION MODEL.
 
-DESIGN DECISION (documented honestly, see docs/Architecture.md for full reasoning):
-    The tabular model is the ONLY component in this system trained on all four
-    classes (normal / leukemia / malaria / both) jointly. The leukemia and malaria
-    CNNs were each trained on separate, disease-specific datasets with no
-    overlapping patients and no joint ground truth — the leukemia CNN never saw
-    a malaria-infected cell during training, and vice versa.
+DESIGN HISTORY (see docs/Architecture.md for full reasoning):
+    An earlier version of this module used rule-based fusion: the tabular
+    model's prediction drove the diagnosis outright, with the relevant CNN's
+    confidence shown as supporting evidence but never weighed against the
+    tabular verdict. That approach was simple but not a genuine "fusion" —
+    it never let CNN evidence override or adjust an uncertain tabular call.
 
-    Therefore: the tabular model's prediction drives the final diagnosis,
-    INCLUDING the "both" case. The relevant CNN (leukemia or malaria) is used
-    to provide a supporting confidence score alongside the tabular verdict —
-    it confirms/contextualizes the diagnosis using image evidence, but does
-    not independently override the tabular model's class decision.
-
-    This is a deliberate choice to avoid overclaiming: we do NOT ask either CNN
-    to render an opinion on a condition it was never trained to recognize.
+    This version uses a trained logistic regression meta-model
+    (src/training/train_fusion_model.py) that takes all 6 signals —
+    [p_normal, p_leukemia, p_malaria, p_both] from the tabular model, plus
+    leukemia_cnn_prob and malaria_cnn_prob — and learns how to combine them,
+    including cases where the tabular signal is ambiguous/borderline (see
+    generate_fusion_training_data.py for how ambiguous training cases were
+    constructed) and the CNN evidence should carry more weight.
 """
 
 import sys
+import json
+import pandas as pd
 from pathlib import Path
 
+
+import joblib
+import numpy as np
+
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+from src.utils.config import SAVED_MODELS_DIR
 
 LABEL_NAMES = ["normal", "leukemia", "malaria", "both"]
+
+_fusion_model = joblib.load(SAVED_MODELS_DIR / "fusion_model.pkl")
+with open(SAVED_MODELS_DIR / "fusion_feature_order.json") as f:
+    _FEATURE_ORDER = json.load(f)  # e.g. [normal, leukemia, malaria, both, leukemia_cnn_prob, malaria_cnn_prob]
 
 
 def fuse_prediction(tabular_probs, leukemia_cnn_prob=None, malaria_cnn_prob=None):
     """
-    Combines model outputs into one final diagnosis + explanation.
+    Combines model outputs into one final diagnosis + explanation, using the
+    trained fusion meta-model rather than a fixed rule.
 
     Args:
         tabular_probs: array-like of length 4, probabilities for
                        [normal, leukemia, malaria, both] from the XGBoost model.
-        leukemia_cnn_prob: float or None. P(cancer) from the leukemia CNN,
-                            if a blood smear image was provided.
-        malaria_cnn_prob: float or None. P(parasitized) from the malaria CNN,
-                           if a blood smear image was provided.
+        leukemia_cnn_prob: float or None. P(cancer) from the leukemia CNN.
+        malaria_cnn_prob: float or None. P(parasitized) from the malaria CNN.
+            NOTE: the fusion model was trained assuming both CNN scores are
+            always present (this system requires image + lab values jointly —
+            see docs/Architecture.md). If either is missing, it's filled with
+            0.0 as a neutral placeholder; this is a known edge case, not a
+            fully-supported partial-input path.
 
     Returns:
         dict with:
-            - "diagnosis": final class name (str)
-            - "tabular_confidence": probability of the winning class per tabular model
-            - "image_support": dict describing what the relevant CNN(s) reported,
-                                 or a note explaining why no image evidence was used
+            - "diagnosis": final class name (str), chosen by the fusion model
+            - "tabular_confidence": probability of the tabular model's own top class
+                                     (kept for transparency/comparison, not what
+                                     drives the final diagnosis anymore)
+            - "fusion_confidence": the fusion model's confidence in its own decision
+            - "image_support": dict of the CNN scores that were fed into fusion
             - "explanation": human-readable summary of how the decision was reached
     """
+    tabular_probs = list(tabular_probs)
     tabular_pred_idx = int(max(range(4), key=lambda i: tabular_probs[i]))
-    diagnosis = LABEL_NAMES[tabular_pred_idx]
+    tabular_top_class = LABEL_NAMES[tabular_pred_idx]
     tabular_confidence = float(tabular_probs[tabular_pred_idx])
 
+    leuk_prob = float(leukemia_cnn_prob) if leukemia_cnn_prob is not None else 0.0
+    mal_prob = float(malaria_cnn_prob) if malaria_cnn_prob is not None else 0.0
+
+    feature_values = {
+        "normal": tabular_probs[0],
+        "leukemia": tabular_probs[1],
+        "malaria": tabular_probs[2],
+        "both": tabular_probs[3],
+        "leukemia_cnn_prob": leuk_prob,
+        "malaria_cnn_prob": mal_prob,
+    }
+    X = pd.DataFrame([[feature_values[col] for col in _FEATURE_ORDER]], columns=_FEATURE_ORDER)
+
+    fusion_pred = _fusion_model.predict(X)[0]
+    fusion_probs = _fusion_model.predict_proba(X)[0]
+    fusion_classes = list(_fusion_model.classes_)
+    fusion_confidence = float(fusion_probs[fusion_classes.index(fusion_pred)])
+
+    diagnosis = fusion_pred
+
     image_support = {}
+    if leukemia_cnn_prob is not None:
+        image_support["leukemia_cnn_p_cancer"] = leuk_prob
+    if malaria_cnn_prob is not None:
+        image_support["malaria_cnn_p_parasitized"] = mal_prob
+
     explanation_parts = [
-        f"Tabular model predicted '{diagnosis}' with {tabular_confidence:.1%} confidence."
+        f"Fusion model predicted '{diagnosis}' with {fusion_confidence:.1%} confidence, "
+        f"combining tabular lab values (top class: '{tabular_top_class}' at "
+        f"{tabular_confidence:.1%}) with CNN image evidence."
     ]
 
-    if diagnosis == "leukemia":
-        if leukemia_cnn_prob is not None:
-            image_support["leukemia_cnn_p_cancer"] = float(leukemia_cnn_prob)
-            explanation_parts.append(
-                f"Leukemia CNN independently gave this image a {leukemia_cnn_prob:.1%} "
-                f"probability of being cancerous, supporting this diagnosis."
-            )
-        else:
-            explanation_parts.append("No blood smear image was provided to confirm with imaging.")
+    if diagnosis != tabular_top_class:
+        explanation_parts.append(
+            f"Note: the fusion model's diagnosis differs from the tabular model's "
+            f"standalone top prediction ('{tabular_top_class}') — image evidence "
+            f"shifted the final decision."
+        )
 
-    elif diagnosis == "malaria":
-        if malaria_cnn_prob is not None:
-            image_support["malaria_cnn_p_parasitized"] = float(malaria_cnn_prob)
-            explanation_parts.append(
-                f"Malaria CNN independently gave this image a {malaria_cnn_prob:.1%} "
-                f"probability of being parasitized, supporting this diagnosis."
-            )
-        else:
-            explanation_parts.append("No blood smear image was provided to confirm with imaging.")
-
-    elif diagnosis == "both":
-        # Both CNNs are relevant here, if an image was provided. Note: since a single
-        # smear image typically reflects ONE condition's visual signature, image
-        # evidence for "both" is inherently limited — this is a known, disclosed
-        # limitation rather than something the system claims to solve.
-        if leukemia_cnn_prob is not None:
-            image_support["leukemia_cnn_p_cancer"] = float(leukemia_cnn_prob)
-        if malaria_cnn_prob is not None:
-            image_support["malaria_cnn_p_parasitized"] = float(malaria_cnn_prob)
-        if image_support:
-            explanation_parts.append(
-                "Note: 'both' diagnoses are driven by lab values (the only data source "
-                "with joint ground truth for co-occurring conditions). Image evidence is "
-                "shown for reference but a single smear image cannot reliably confirm two "
-                "simultaneous conditions."
-            )
-        else:
-            explanation_parts.append("No blood smear image was provided to confirm with imaging.")
-
-    else:  # normal
-        explanation_parts.append("No signs of leukemia or malaria detected in lab values.")
+    if diagnosis == "both":
+        explanation_parts.append(
+            "Note: a single smear image typically reflects one condition's visual "
+            "signature, so image evidence for 'both' has inherent limits — shown "
+            "here for reference, weighed by the fusion model alongside lab values."
+        )
 
     return {
         "diagnosis": diagnosis,
         "tabular_confidence": tabular_confidence,
+        "fusion_confidence": fusion_confidence,
         "image_support": image_support,
         "explanation": " ".join(explanation_parts),
     }
 
 
 if __name__ == "__main__":
-    # Quick sanity-check examples — no real model calls, just testing the logic.
     print("Example 1: tabular predicts leukemia, image confirms")
     result = fuse_prediction(
         tabular_probs=[0.05, 0.80, 0.05, 0.10],
         leukemia_cnn_prob=0.91,
-        malaria_cnn_prob=None,
+        malaria_cnn_prob=0.10,
     )
     print(result, "\n")
 
-    print("Example 2: tabular predicts both, both CNN scores available")
+    print("Example 2: tabular uncertain, CNN evidence may shift the call")
     result = fuse_prediction(
-        tabular_probs=[0.02, 0.10, 0.08, 0.80],
-        leukemia_cnn_prob=0.65,
-        malaria_cnn_prob=0.70,
-    )
-    print(result, "\n")
-
-    print("Example 3: tabular predicts normal, no image provided")
-    result = fuse_prediction(
-        tabular_probs=[0.85, 0.05, 0.05, 0.05],
+        tabular_probs=[0.30, 0.35, 0.25, 0.10],
+        leukemia_cnn_prob=0.20,
+        malaria_cnn_prob=0.85,
     )
     print(result)

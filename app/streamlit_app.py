@@ -146,7 +146,8 @@ if predict_clicked:
         st.subheader("Result")
 
         diagnosis = result["diagnosis"]
-        confidence = result["tabular_confidence"]
+        confidence = result["fusion_confidence"]
+        tabular_confidence = result["tabular_confidence"]
 
         diagnosis_colors = {
             "normal": "green",
@@ -157,7 +158,9 @@ if predict_clicked:
         color = diagnosis_colors.get(diagnosis, "blue")
 
         st.markdown(f"### Diagnosis: :{color}[{diagnosis.upper()}]")
-        st.progress(confidence, text=f"Tabular model confidence: {confidence:.1%}")
+        st.progress(confidence, text=f"Fusion model confidence: {confidence:.1%}")
+        st.caption(f"Tabular model's standalone prediction confidence: {tabular_confidence:.1%}")
+        
         st.info(result["explanation"])
         st.markdown('</div>', unsafe_allow_html=True)
 

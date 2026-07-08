@@ -91,3 +91,79 @@ Image + Lab Values
        │
        └──> Fusion ──> Final diagnosis + explanation + Grad-CAM
 ```
+
+## Learned fusion model (replacing rule-based fusion)
+
+An earlier version of this system used rule-based fusion: the tabular
+model's top prediction determined the final diagnosis outright, with the
+relevant CNN's confidence shown only as supporting evidence — never actually
+weighed against or capable of overriding the tabular verdict. This worked,
+but wasn't genuine fusion; it was conditional routing.
+
+**Replaced with a trained fusion model.** A logistic regression meta-model
+now takes all 6 available signals — the tabular model's 4-class probability
+distribution, plus both CNNs' confidence scores — and learns to combine them,
+including cases where the tabular signal is ambiguous and CNN evidence
+should carry more or less weight.
+
+### Training data challenge and fix
+
+Initial fusion training data was generated using the same distributions the
+tabular model was already trained on, so the tabular model solved every
+training example perfectly (100% test accuracy on the fusion task) — which
+meant the fusion model just learned to copy the tabular model's argmax,
+demonstrating nothing about genuine multi-signal combination.
+
+**Fix:** the fusion training data generator (`generate_fusion_training_data.py`)
+deliberately blends ~40% of samples' lab values with another class's
+distribution (a configurable blend weight), creating genuinely ambiguous
+cases while keeping image labels as reliable ground truth. Retraining on this
+harder dataset dropped test accuracy from 100% to 88.3% — a meaningful,
+credible number reflecting a model that has to actually weigh conflicting
+evidence, not one exploiting an artificially easy task. Confusion matrix
+analysis confirmed errors were "reasonable" (concentrated between
+adjacent/related classes, e.g. malaria↔both, leukemia↔both), not erratic.
+
+### Verified override behavior
+
+Because the trained tabular model turned out to have very sharp,
+near-deterministic decision boundaries in practice (manually probing dozens
+of lab value combinations consistently returned >97% confidence for one
+class), naturally-occurring ambiguous real-world inputs proved difficult to
+find. To verify the fusion model's override logic directly, `fuse_prediction()`
+was tested with hand-crafted conflicting inputs
+(`src/inference/test_fusion_override.py`):
+
+- **Override confirmed**: given an ambiguous tabular signal (normal 42% vs.
+  leukemia 38%) paired with a strong leukemia CNN signal (93%), the fusion
+  model correctly overrode the tabular model's standalone top pick and
+  diagnosed leukemia — explicitly flagging that image evidence shifted the
+  decision.
+- **Calibrated restraint confirmed**: given a very confident tabular signal
+  (leukemia at 97%) paired with a single strongly conflicting CNN score, the
+  fusion model correctly stuck with the tabular verdict rather than being
+  swayed by one disagreeing source.
+- **Honest limitation found**: given an ambiguous tabular signal (normal 45%
+  vs. malaria 40%) paired with a very strong malaria CNN signal (95%), the
+  fusion model landed on "normal" at only 48% confidence — essentially
+  uncertain rather than confidently resolving the conflict either way. This
+  is disclosed as a known limitation: the model can produce low-confidence,
+  ambiguous outputs under conflicting evidence rather than always resolving
+  decisively. This is arguably more honest behavior than false confidence,
+  but is not a fully "solved" conflict-resolution mechanism.
+
+  ## End-to-end system evaluation
+
+Beyond evaluating each component in isolation, the complete pipeline
+(tabular subprocess + both CNNs + learned fusion model) was evaluated
+end-to-end on 120 held-out test cases (30 per class), generated with a
+separate random seed from all training data and with the same deliberate
+ambiguity-injection technique used in fusion model training (~40% of
+samples blend lab values with another class's distribution).
+
+**Result: 87.5% end-to-end accuracy.** Per-class recall: normal 100%,
+both 87%, malaria 83%, leukemia 80%. Confusion matrix analysis shows all
+misclassifications occur between clinically-related classes (e.g.
+malaria↔both, leukemia↔both) — no confusions between unrelated classes
+(e.g. normal↔both), indicating the system's errors are concentrated in
+genuinely hard/ambiguous cases rather than reflecting broken logic.

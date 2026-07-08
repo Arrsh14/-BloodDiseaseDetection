@@ -1,0 +1,8 @@
+[
+  "normal",
+  "leukemia",
+  "malaria",
+  "both",
+  "leukemia_cnn_prob",
+  "malaria_cnn_prob"
+]
