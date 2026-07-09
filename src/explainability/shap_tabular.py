@@ -1,88 +1,106 @@
 """
-SHAP explainability for the tabular XGBoost model (leukemia / malaria / both / normal).
+SHAP explainability for the tabular XGBoost model.
 
-Generates two things, saved to results/:
-    1. shap_summary_<class>.png  - global feature importance (beeswarm) per class
-    2. shap_waterfall_example.png - explanation for one single example prediction
-
-Uses the model saved by train_tabular_model.py and the held-out test set,
-so explanations are shown on data the model did not train on.
+Computes SHAP values on the held-out test set to show which lab values
+drove which predictions — the tabular equivalent of Grad-CAM for the CNNs.
+Produces:
+    1. A summary plot: which features matter most overall, across all predictions
+    2. Individual force plots: for a few example patients, exactly which
+       features pushed the prediction toward/away from the predicted class
 """
 
-import json
 import sys
 from pathlib import Path
 
 import joblib
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import shap
+import matplotlib.pyplot as plt
 
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-from src.utils.config import PROCESSED_DIR, SAVED_MODELS_DIR, RESULTS_DIR
+from src.utils.config import PROCESSED_DIR, SAVED_MODELS_DIR, ROOT_DIR
 
 FEATURE_COLS = ["wbc_count", "hemoglobin", "platelet_count", "rbc_count", "parasitemia_pct"]
-TABULAR_PROCESSED_DIR = PROCESSED_DIR / "tabular"
+LABEL_NAMES = ["normal", "leukemia", "malaria", "both"]
 
 
 def main():
-    # Load model
+    # --- Load trained tabular model and test data ---
     model = joblib.load(SAVED_MODELS_DIR / "tabular_model.pkl")
-
-    # Load label map (int -> class name) for readable plot titles
-    with open(TABULAR_PROCESSED_DIR / "label_map.json") as f:
-        label_map = json.load(f)  # e.g. {"normal": 0, "leukemia": 1, ...}
-    inv_label_map = {v: k for k, v in label_map.items()}
-
-    # Load test set
-    test_df = pd.read_csv(TABULAR_PROCESSED_DIR / "test.csv")
+    test_df = pd.read_csv(PROCESSED_DIR / "tabular" / "test.csv")
     X_test = test_df[FEATURE_COLS]
+    y_test = test_df["label"]
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Loaded test set: {len(X_test)} samples")
 
-    # --- 1. Global explanation: SHAP summary (beeswarm) plot per class ---
-    print("Computing SHAP values for test set...")
+    # --- Compute SHAP values ---
+    # TreeExplainer is the fast, exact method for tree-based models like XGBoost
+    print("Computing SHAP values (this may take a moment)...")
     explainer = shap.TreeExplainer(model)
-    shap_values = explainer(X_test)  # shape: (n_samples, n_features, n_classes) for multiclass
+    shap_values = explainer.shap_values(X_test)
 
-    n_classes = shap_values.values.shape[2]
-    for class_idx in range(n_classes):
-        class_name = inv_label_map[class_idx]
+    # For multi-class XGBoost, shap_values is a list of arrays (one per class)
+    # or a single 3D array depending on SHAP/XGBoost version — handle both.
+    if isinstance(shap_values, list):
+        shap_values_per_class = shap_values  # list of (n_samples, n_features) arrays
+    else:
+        # shape (n_samples, n_features, n_classes) -> split into list per class
+        shap_values_per_class = [shap_values[:, :, i] for i in range(len(LABEL_NAMES))]
+
+    out_dir = ROOT_DIR / "results" / "shap_plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Summary plot: overall feature importance per class ---
+    for class_idx, class_name in enumerate(LABEL_NAMES):
         plt.figure()
         shap.summary_plot(
-            shap_values.values[:, :, class_idx],
+            shap_values_per_class[class_idx],
             X_test,
+            feature_names=FEATURE_COLS,
             show=False,
         )
-        plt.title(f"SHAP Summary — class: {class_name}")
+        plt.title(f"SHAP Summary — driving factors for '{class_name}' predictions")
         plt.tight_layout()
-        out_path = RESULTS_DIR / f"shap_summary_{class_name}.png"
-        plt.savefig(out_path, dpi=150)
+        save_path = out_dir / f"shap_summary_{class_name}.png"
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
-        print(f"Saved {out_path}")
+        print(f"Saved: {save_path}")
 
-    # --- 2. Local explanation: waterfall plot for one example ---
-    # Pick one test-set example to explain in detail — first row, but you can
-    # change `example_idx` to inspect any specific patient.
-    example_idx = 0
-    example_row = X_test.iloc[example_idx]
-    true_label = inv_label_map[test_df.iloc[example_idx]["label"]]
-    predicted_label_idx = model.predict(X_test.iloc[[example_idx]])[0]
-    predicted_label = inv_label_map[predicted_label_idx]
+    # --- Individual example explanations: one correctly-classified case per class ---
+    predictions = model.predict(X_test)
+    for class_idx, class_name in enumerate(LABEL_NAMES):
+        # find a test sample that's correctly predicted as this class
+        matches = np.where((y_test.values == class_idx) & (predictions == class_idx))[0]
+        if len(matches) == 0:
+            print(f"No correctly-classified example found for class '{class_name}', skipping")
+            continue
 
-    print(f"\nExample row (index {example_idx}):")
-    print(example_row)
-    print(f"True label: {true_label} | Predicted label: {predicted_label}")
+        sample_idx = matches[0]
+        sample_row = X_test.iloc[sample_idx]
 
-    # Explain the SHAP values for the predicted class specifically
-    plt.figure()
-    shap.plots.waterfall(shap_values[example_idx, :, predicted_label_idx], show=False)
-    plt.title(f"SHAP Waterfall — true: {true_label}, predicted: {predicted_label}")
-    plt.tight_layout()
-    out_path = RESULTS_DIR / "shap_waterfall_example.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved {out_path}")
+        print(f"\nExample — '{class_name}' prediction (test row {sample_idx}):")
+        print(sample_row.to_dict())
+
+        plt.figure()
+        shap.bar_plot(
+            shap_values_per_class[class_idx][sample_idx],
+            feature_names=FEATURE_COLS,
+            show=False,
+        )
+        plt.title(f"SHAP feature contributions — example '{class_name}' prediction")
+        plt.tight_layout()
+        save_path = out_dir / f"shap_example_{class_name}.png"
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {save_path}")
+
+    print(f"\nAll SHAP plots saved to: {out_dir}")
+    print("\nInterpretation guide:")
+    print("- Summary plots show which features matter most overall for each class")
+    print("- Example plots show exactly which features drove ONE specific prediction")
+    print("- Positive SHAP value = pushed prediction TOWARD that class")
+    print("- Negative SHAP value = pushed prediction AWAY from that class")
 
 
 if __name__ == "__main__":
