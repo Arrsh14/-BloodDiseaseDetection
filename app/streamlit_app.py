@@ -25,7 +25,7 @@ import torch
 
 st.set_page_config(page_title="Blood Disease Detection", layout="centered", page_icon="🩸")
 
-# --- Light theme + card styling ---
+# --- Light theme styling (card look now comes from st.container(border=True)) ---
 st.markdown("""
 <style>
     .stApp {
@@ -42,14 +42,6 @@ st.markdown("""
     }
     p, span, label, .stMarkdown {
         color: #333333;
-    }
-    .card {
-        background-color: #ffffff;
-        border-radius: 16px;
-        padding: 1.75rem;
-        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-        border: 1px solid #ececec;
-        margin-bottom: 1.5rem;
     }
     div[data-testid="stFileUploader"] {
         background-color: #fafbfc;
@@ -97,22 +89,20 @@ st.write("")
 col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("1. Blood Smear Image")
-    uploaded_image = st.file_uploader("Upload image", type=["png", "jpg", "jpeg", "bmp"])
-    if uploaded_image:
-        st.image(uploaded_image, caption="Uploaded image", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader("1. Blood Smear Image")
+        uploaded_image = st.file_uploader("Upload image", type=["png", "jpg", "jpeg", "bmp"])
+        if uploaded_image:
+            st.image(uploaded_image, caption="Uploaded image", use_container_width=True)
 
 with col2:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("2. CBC Lab Values")
-    wbc_count = st.number_input("WBC count (×10³/µL)", min_value=0.0, value=7.5, step=0.5)
-    hemoglobin = st.number_input("Hemoglobin (g/dL)", min_value=0.0, value=14.0, step=0.1)
-    platelet_count = st.number_input("Platelet count (×10³/µL)", min_value=0.0, value=300.0, step=10.0)
-    rbc_count = st.number_input("RBC count (million/µL)", min_value=0.0, value=5.0, step=0.1)
-    parasitemia_pct = st.number_input("Parasitemia (%)", min_value=0.0, value=0.0, step=0.1)
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader("2. CBC Lab Values")
+        wbc_count = st.number_input("WBC count (×10³/µL)", min_value=0.0, value=7.5, step=0.5)
+        hemoglobin = st.number_input("Hemoglobin (g/dL)", min_value=0.0, value=14.0, step=0.1)
+        platelet_count = st.number_input("Platelet count (×10³/µL)", min_value=0.0, value=300.0, step=10.0)
+        rbc_count = st.number_input("RBC count (million/µL)", min_value=0.0, value=5.0, step=0.1)
+        parasitemia_pct = st.number_input("Parasitemia (%)", min_value=0.0, value=0.0, step=0.1)
 
 predict_clicked = st.button("Run Prediction", type="primary", use_container_width=True)
 
@@ -142,79 +132,74 @@ if predict_clicked:
 
         # --- Results section ---
         st.write("")
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Result")
+        with st.container(border=True):
+            st.subheader("Result")
 
-        diagnosis = result["diagnosis"]
-        confidence = result["fusion_confidence"]
-        tabular_confidence = result["tabular_confidence"]
+            diagnosis = result["diagnosis"]
+            confidence = result["fusion_confidence"]
+            tabular_confidence = result["tabular_confidence"]
 
-        diagnosis_colors = {
-            "normal": "green",
-            "leukemia": "red",
-            "malaria": "orange",
-            "both": "violet",
-        }
-        color = diagnosis_colors.get(diagnosis, "blue")
+            diagnosis_colors = {
+                "normal": "green",
+                "leukemia": "red",
+                "malaria": "orange",
+                "both": "violet",
+            }
+            color = diagnosis_colors.get(diagnosis, "blue")
 
-        st.markdown(f"### Diagnosis: :{color}[{diagnosis.upper()}]")
-        st.progress(confidence, text=f"Fusion model confidence: {confidence:.1%}")
-        st.caption(f"Tabular model's standalone prediction confidence: {tabular_confidence:.1%}")
-        
-        st.info(result["explanation"])
-        st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown(f"### Diagnosis: :{color}[{diagnosis.upper()}]")
+            st.progress(confidence, text=f"Fusion model confidence: {confidence:.1%}")
+            st.caption(f"Tabular model's standalone prediction confidence: {tabular_confidence:.1%}")
+
+            st.info(result["explanation"])
 
         # --- Probability breakdown ---
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Tabular Model — Full Probability Breakdown")
-        st.bar_chart(result["tabular_probs"])
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.subheader("Tabular Model — Full Probability Breakdown")
+            st.bar_chart(result["tabular_probs"])
 
         # --- CNN confidences ---
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Leukemia CNN — P(cancer)", f"{result['leukemia_cnn_prob']:.1%}")
-        with c2:
-            st.metric("Malaria CNN — P(parasitized)", f"{result['malaria_cnn_prob']:.1%}")
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("Leukemia CNN — P(cancer)", f"{result['leukemia_cnn_prob']:.1%}")
+            with c2:
+                st.metric("Malaria CNN — P(parasitized)", f"{result['malaria_cnn_prob']:.1%}")
 
         # --- Grad-CAM visualization ---
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Grad-CAM: Where the relevant CNN focused")
+        with st.container(border=True):
+            st.subheader("Grad-CAM: Where the relevant CNN focused")
 
-        relevant_model = _leukemia_model if diagnosis in ("leukemia", "both") else _malaria_model
-        model_label = "Leukemia CNN" if diagnosis in ("leukemia", "both") else "Malaria CNN"
+            relevant_model = _leukemia_model if diagnosis in ("leukemia", "both") else _malaria_model
+            model_label = "Leukemia CNN" if diagnosis in ("leukemia", "both") else "Malaria CNN"
 
-        if diagnosis == "normal":
-            st.write("No abnormality detected — Grad-CAM shown using leukemia CNN as reference.")
-            relevant_model = _leukemia_model
-            model_label = "Leukemia CNN"
+            if diagnosis == "normal":
+                st.write("No abnormality detected — Grad-CAM shown using leukemia CNN as reference.")
+                relevant_model = _leukemia_model
+                model_label = "Leukemia CNN"
 
-        eval_transform = get_eval_transforms()
-        image_tensor = eval_transform(image)
-        input_tensor = image_tensor.unsqueeze(0).to(_device)
+            eval_transform = get_eval_transforms()
+            image_tensor = eval_transform(image)
+            input_tensor = image_tensor.unsqueeze(0).to(_device)
 
-        target_layer = relevant_model.layer4[-1]
-        cam = GradCAM(model=relevant_model, target_layers=[target_layer])
+            target_layer = relevant_model.layer4[-1]
+            cam = GradCAM(model=relevant_model, target_layers=[target_layer])
 
-        with torch.no_grad():
-            output = relevant_model(input_tensor)
-            pred_class = output.argmax(dim=1).item()
+            with torch.no_grad():
+                output = relevant_model(input_tensor)
+                pred_class = output.argmax(dim=1).item()
 
-        grayscale_cam = cam(input_tensor=input_tensor, targets=[ClassifierOutputTarget(pred_class)])
-        grayscale_cam = grayscale_cam[0, :]
+            grayscale_cam = cam(input_tensor=input_tensor, targets=[ClassifierOutputTarget(pred_class)])
+            grayscale_cam = grayscale_cam[0, :]
 
-        rgb_img = denormalize(image_tensor.cpu())
-        visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+            rgb_img = denormalize(image_tensor.cpu())
+            visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
 
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.image(rgb_img, caption="Original", use_container_width=True)
-        with col_b:
-            st.image(visualization, caption=f"{model_label} attention", use_container_width=True)
-
-        st.markdown('</div>', unsafe_allow_html=True)
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.image(rgb_img, caption="Original", use_container_width=True)
+            with col_b:
+                st.image(visualization, caption=f"{model_label} attention", use_container_width=True)
 
         Path(tmp_path).unlink(missing_ok=True)
 

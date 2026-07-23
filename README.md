@@ -12,6 +12,31 @@ Built as a portfolio project to demonstrate end-to-end ML engineering: data sour
 
 Upload a blood smear image + enter CBC lab values → get a fused diagnosis with supporting evidence from both the image and the lab values, plus a Grad-CAM heatmap showing where the relevant CNN focused.
 
+## Demo
+
+<table>
+<tr>
+<td width="50%">
+<img src="docs/assets/homepage.png" width="100%"/>
+<p align="center"><i>App homepage — upload an image and enter CBC values</i></p>
+</td>
+<td width="50%">
+<img src="docs/assets/prediction_output.png" width="100%"/>
+<p align="center"><i>Fused diagnosis combining tabular and CNN model outputs</i></p>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/assets/gradcam_heatmap.png" width="100%"/>
+<p align="center"><i>Grad-CAM highlighting the model's attention on the parasitized region</i></p>
+</td>
+<td width="50%">
+<img src="docs/assets/probability_chart.png" width="100%"/>
+<p align="center"><i>Tabular model's full probability breakdown across all 4 classes</i></p>
+</td>
+</tr>
+</table>
+
 ## Architecture
 
 Three independently-trained models feed into a learned fusion layer:
